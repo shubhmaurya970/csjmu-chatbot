@@ -1,13 +1,10 @@
 import os
-import pytesseract
 from PyPDF2 import PdfReader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain.schema import Document
+from langchain_core.documents import Document
 
-# Set Tesseract path
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 def load_pdf_documents(directory):
     """Load and extract text from PDF files in the given directory."""
@@ -91,7 +88,7 @@ def main():
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         print("Please ensure all required dependencies are installed:")
-        print("pip install langchain langchain-community langchain-chroma langchain-huggingface PyPDF2 pytesseract")
+        print("pip install -r requirements.txt")
 
 if __name__ == "__main__":
     main()

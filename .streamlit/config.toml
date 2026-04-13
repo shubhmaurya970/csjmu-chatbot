@@ -1,0 +1,23 @@
+# Switchable Light / Dark / System requires BOTH [theme.light] and [theme.dark].
+# A single flat [theme] block disables the theme radio in Settings / app menu.
+# After editing: restart Streamlit (stop server, then `streamlit run main.py`).
+
+[theme]
+base = "light"
+
+[theme.light]
+primaryColor = "#002D62"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6F9"
+textColor = "#1E1E1E"
+font = "sans serif"
+
+[theme.dark]
+primaryColor = "#E8C547"
+backgroundColor = "#0d1320"
+secondaryBackgroundColor = "#152238"
+textColor = "#E8ECF2"
+font = "sans serif"
+
+[client]
+toolbarMode = "auto"

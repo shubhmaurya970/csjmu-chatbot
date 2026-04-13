@@ -1,189 +1,152 @@
-# Change "College Name" to the actual college name you are building the chatbot for.
-# Throughout the code, replace "College Name" with the actual college name.
-# This is a FastAPI backend combined with a Streamlit frontend for a chatbot using LangChain and Groq LLM.
-# You should have a config.json file in the same directory with your GROQ_API_KEY.
-# Make sure to install all required packages:
-# pip install requirements.txt and the requirements.txt should include:
-# fastapi, uvicorn, pydantic, streamlit, langchain, langchain-huggingface, langchain-chroma, langchain-groq, fpdf
-# To run the project:
-# - Run streamlit: streamlit run main.py
+"""
+Streamlit frontend with a RAG-backed assistant using LangChain, Chroma, and Groq.
+Place a `config.json` beside this file with `GROQ_API_KEY` (and optional `COLLEGE_NAME`).
+Run: streamlit run main.py
+"""
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
-import os
-import json
-import re
-import streamlit as st
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
-from langchain_groq import ChatGroq
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import ConversationalRetrievalChain
-from langchain.prompts import PromptTemplate
-from fpdf import FPDF  # Using the original fpdf package
 from datetime import datetime
+import json
+import os
+import re
+import time
+
+import streamlit as st
+from fpdf import FPDF
+from langchain_chroma import Chroma
+from langchain_classic.chains import ConversationalRetrievalChain
+from langchain_classic.memory import ConversationBufferMemory
+from langchain_core.prompts import PromptTemplate
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
+
+
+def stream_text(text):
+    for word in text.split():
+        yield word + " "
+        time.sleep(0.02)
 
 def remove_emojis(text):
-    emoji_pattern = re.compile("["
-        u"\U0001F600-\U0001F64F"  # emoticons
-        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
-        u"\U0001F680-\U0001F6FF"  # transport & map symbols
-        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
-        u"\U00002500-\U00002BEF"  # chinese char
-        u"\U00002702-\U000027B0"
-        u"\U00002702-\U000027B0"
-        u"\U000024C2-\U0001F251"
-        u"\U0001f926-\U0001f937"
-        u"\U00010000-\U0010ffff"
-        u"\u2640-\u2642" 
-        u"\u2600-\u2B55"
-        u"\u200d"
-        u"\u23cf"
-        u"\u23e9"
-        u"\u231a"
-        u"\ufe0f"  # dingbats
-        u"\u3030"
-                      "]+", flags=re.UNICODE)
-    return emoji_pattern.sub(r'', text)
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"
+        "\U0001F300-\U0001F5FF"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF"
+        "\U00002500-\U00002BEF"
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "\U0001f926-\U0001f937"
+        "\U00010000-\U0010ffff"
+        "\u2640-\u2642"
+        "\u2600-\u2B55"
+        "\u200d"
+        "\u23cf"
+        "\u23e9"
+        "\u231a"
+        "\ufe0f"
+        "\u3030"
+        "]+",
+        flags=re.UNICODE,
+    )
+    return emoji_pattern.sub("", text)
+
+
+def text_for_pdf(text: str) -> str:
+    """FPDF core fonts (Helvetica) only support Latin-1; normalize Unicode for export."""
+    t = remove_emojis(text or "")
+    for old, new in (
+        ("\u2014", "-"),  # em dash
+        ("\u2013", "-"),  # en dash
+        ("\u2012", "-"),  # figure dash
+        ("\u2212", "-"),  # minus
+        ("\u2018", "'"),
+        ("\u2019", "'"),
+        ("\u201c", '"'),
+        ("\u201d", '"'),
+        ("\u2026", "..."),
+        ("\u00a0", " "),
+        ("\u2009", " "),
+        ("\u200b", ""),
+        ("\ufeff", ""),
+    ):
+        t = t.replace(old, new)
+    return t.encode("latin-1", errors="replace").decode("latin-1")
+
 
 working_dir = os.path.dirname(os.path.realpath(__file__))
-config_data = json.load(open(f"{working_dir}/config.json"))
+_config_path = os.path.join(working_dir, "config.json")
+with open(_config_path, encoding="utf-8") as _f:
+    config_data = json.load(_f)
+
 GROQ_API_KEY = config_data["GROQ_API_KEY"]
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
-# FastAPI app and Pydantic model for API input
-app = FastAPI()
+COLLEGE_NAME = config_data.get("COLLEGE_NAME", "Chhatrapati Shahu Ji Maharaj University, Kanpur")
+COLLEGE_SHORT = config_data.get("COLLEGE_SHORT", "CSJMU")
 
-class MessageRequest(BaseModel):
-    message: str
 
-# FastAPI route for chatbot
-@app.post("/chat")
-async def chatbot(request: MessageRequest):
-    message = request.message
+def system_prompt_for_college(name: str) -> str:
+    return f"""You are a specialized AI assistant for **{name}**. Answer only from the retrieved context and verified university-related information.
 
-    # Setup vectorstore (same as Streamlit code)
-    vectorstore = setup_vectorstore()
+**Goals**
+1. Help students and visitors with admissions, academics, calendars, programs, and campus services.
+2. Be clear, concise, and accurate; use short bullet lists when helpful.
+3. Use a warm, professional tone suitable for a public university help desk.
 
-    # Setup the conversational chain (same as Streamlit code)
-    conversational_chain = chat_chain(vectorstore)
+**Rules**
+- If the context does not contain the answer, say you do not have that information in the knowledge base and suggest contacting the relevant university office.
+- Do not claim to be an official spokesperson or employee; you are an informational assistant.
+- Do not give legal, medical, or financial advice beyond general university information.
+- Stay on topics related to {name} and the provided documents.
 
-    # Check for sensitive topics
-    if contains_sensitive_topics(message):
-        response = "It seems you may be asking questions outside my context, please ask questions related to College Name only."
-    else:
-        # Get response from the conversational chain
-        response = conversational_chain({"question": message})["answer"]
-
-    return {"response": response}
-
-# Default prompts
-DEFAULT_SYSTEM_PROMPT = """You are a **specialized AI assistant** dedicated exclusively to **College Name** and its services. Your responses must be **accurate, concise, and strictly based on College Name's verified data**.
-
-Your goals:
-
-1. Quickly understand the user’s needs with **minimal follow-up questions**.
-2. Provide **clear, concise, helpful answers** using College Name data.
-3. Suggest **relevant College Name services** when appropriate.
-4. Maintain a **warm, professional, and empathetic tone**.
-
----
-
-### **INTERACTION GUIDELINES**
-
-#### **PHASE 1 - Fast Intake (Always Do First)**
-
-Before giving detailed answers, ask the **fewest possible follow-up questions** to collect essential info (aim for 1–3 total). Use concise questions such as:
-
-* “What service are you looking for today?”
-* “Are you a new or existing customer?”
-* “What’s your main goal - growth, branding, leads, or other?”
-* “Do you already have a website?”
-
-**Stop asking once you have enough info to answer effectively.**
-
----
-
-#### **PHASE 2 - RESPOND USING USER DATA + College Name DATA**
-
-Once you have the key answers:
-
-* Use the user data + College Name data only.
-* Deliver clear, short, and high-value responses.
-* Use bullet points for readability.
-* Add **1–3 relevant emojis** to support tone.
-
----
-
-#### **PHASE 3 - RELATED SERVICE SUGGESTIONS**
-
-After the main answer:
-
-* Suggest **1–2 College Name services** that match the user's needs.
-* Example phrasing:
-
-  > “Since you plan a new website, you might also benefit from our SEO services to improve visibility.”
-
----
-
-### **CONTEXT & RESPONSE RULES**
-
-1. If provided context contains relevant College Name info → build on it.
-2. If context is empty or irrelevant → politely inform the user you can only discuss College Name topics.
-3. Always answer using **verified College Name data** only.
-
----
-
-### **TONE RULES**
-
-* Warm, empathetic, supportive.
-* Professional but friendly.
-* Short, concise, and informative.
-* Fact-based.
-
+**Formatting Rules**
+- Always format answers in clean bullet points
+- Use line breaks between points
+- Never return long paragraphs
+- Use proper markdown formatting for lists, links, and emphasis when appropriate.
 """
 
-DEFAULT_NEGATIVE_PROMPT = """
-- Do **NOT** provide any information that is **not supported by verified College Name data** or the provided system context.
-- Do **NOT** imply you are an **employee, representative, agent, or official spokesperson** of College Name.
-- Do **NOT** fabricate or invent College Name **services, features, pricing, policies, internal processes, or proprietary details**.
-- Do **NOT** offer **legal, financial, medical, or other unrelated professional advice** outside College Name's domain.
-- Do **NOT** respond to topics **outside College Name's scope**; instead, politely state that the relevant data is not available.
-- Do **NOT** guess or assume **confidential, internal, or sensitive business information** about College Name.
-- Do **NOT** generate speculative, generic, or hypothetical business advice that is **not grounded in College Name's verified information**.
-- Do **NOT** use, cite, or reference **external sources, external knowledge, or outside databases** beyond the authorized College Name context.
-- Do **NOT** insert personal opinions, assumptions, unfounded claims, or subjective judgments.
-- Do **NOT** mislead the user with unsupported or speculative responses.
-- Do **NOT** use an unprofessional, casual, or overly familiar tone; maintain professionalism at all times.
+
+def negative_prompt_for_college(name: str) -> str:
+    return f"""
+- Do not invent policies, dates, fees, or contacts not supported by the context.
+- Do not discuss topics unrelated to {name} when the user asked about the university; politely redirect.
+- Do not use an unprofessional tone.
 """
+
+
+DEFAULT_SYSTEM_PROMPT = system_prompt_for_college(COLLEGE_NAME)
+DEFAULT_NEGATIVE_PROMPT = negative_prompt_for_college(COLLEGE_NAME)
+
 
 def contains_sensitive_topics(question):
-    sensitive_keywords = [
-    ]
-    
+    if not question:
+        return False
+
+    sensitive_keywords = []
     question_lower = question.lower()
     return any(keyword in question_lower for keyword in sensitive_keywords)
 
-def setup_vectorstore():
-    persist_directory = f"{working_dir}/vector_db_dir"
-    embeddings = HuggingFaceEmbeddings()
-    vectorstore = Chroma(persist_directory=persist_directory,
-                         embedding_function=embeddings)
-    return vectorstore
 
-def chat_chain(vectorstore, system_prompt=DEFAULT_SYSTEM_PROMPT, negative_prompt=DEFAULT_NEGATIVE_PROMPT):
-    llm = ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0
-    )
-    
-    # Create a combined prompt template
+@st.cache_resource
+def setup_vectorstore():
+    persist_directory = os.path.join(working_dir, "vector_db_dir")
+    embeddings = HuggingFaceEmbeddings()
+    return Chroma(persist_directory=persist_directory, embedding_function=embeddings)
+
+
+def chat_chain(
+    vectorstore,
+    system_prompt=DEFAULT_SYSTEM_PROMPT,
+    negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+):
+    llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
+
     prompt_template = f"""{system_prompt}
 
 {negative_prompt}
 
-Context (from mental health database):
+Context (from the university knowledge base):
 {{context}}
 
 Chat History:
@@ -192,188 +155,243 @@ Chat History:
 Question: {{question}}
 
 Answer:"""
-    
+
     prompt = PromptTemplate(
         template=prompt_template,
-        input_variables=["context", "chat_history", "question"]
+        input_variables=["context", "chat_history", "question"],
     )
-    
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 3}  # Retrieve top 3 most relevant documents
-    )
-    memory = ConversationBufferMemory(
-        llm = llm,
-        output_key = "answer",
-        memory_key = "chat_history",
-        return_messages = True
-    )
-    
-    chain = ConversationalRetrievalChain.from_llm(
-        llm = llm,
-        retriever = retriever,
-        chain_type = "stuff",
-        memory = memory,
-        verbose = True,
-        return_source_documents = True,
-        combine_docs_chain_kwargs={"prompt": prompt}
-    )
-    return chain
 
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    memory = ConversationBufferMemory(
+        llm=llm,
+        output_key="answer",
+        memory_key="chat_history",
+        return_messages=True,
+    )
+
+    return ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        chain_type="stuff",
+        memory=memory,
+        verbose=False,
+        return_source_documents=True,
+        combine_docs_chain_kwargs={"prompt": prompt},
+    )
+
+
+# --- Page & CSJMU-themed UI ---
 st.set_page_config(
-    page_title="Chat with College Name's Chatbot",
-    page_icon="🧠",
-    layout="wide",  # Changed to wide layout to accommodate sidebar
+    page_title=f"{COLLEGE_SHORT} Assistant",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# Custom CSS for sidebar styling
-st.markdown("""
+st.markdown(
+    """
     <style>
-    div.css-textbarboxtype {
-        background-color: #EEEEEE;
-        border: 1px solid #DCDCDC;
-        padding: 20px 20px 20px 70px;
-        padding: 5% 5% 5% 10%;
-        border-radius: 10px;
-    }
-    
-    /* Justify text for Purpose section */
-    div.css-textbarboxtype:nth-of-type(3) {
+    /* Hide Streamlit Cloud Deploy only; use the "⋮" menu (top right) for Settings / theme. */
+    .stAppDeployButton,
+    .stDeployButton,
+    [data-testid="stToolbarDeployButton"] {{
+        display: none !important;
+    }}
+    [data-testid="stChatMessage"] {
+    padding: 12px;
+    margin-bottom: 10px;
+    background: rgba(255,255,255,0.04);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.08);
+}
+    :root {{
+        --csjmu-blue: #002D62;
+        --csjmu-gold: #C5A028;
+        --csjmu-gold-light: #E8D78A;
+        --csjmu-surface: #F4F6F9;
+    }}
+    .block-container {{
+        padding-top: 1.25rem;
+        max-width: 1100px;
+    }}
+    /* Follow Streamlit Light/Dark (set in .streamlit/config.toml [theme.light] / [theme.dark]) */
+    div[data-testid="stSidebar"] {{
+        background: var(--secondary-background-color) !important;
+        border-right: 3px solid var(--primary-color);
+    }}
+    .csjmu-hero {{
+        background: linear-gradient(135deg, var(--csjmu-blue) 0%, #0a3d7a 55%, #1a5089 100%);
+        color: #fff;
+        padding: 1.35rem 1.5rem 1.15rem 1.5rem;
+        border-radius: 12px;
+        margin-bottom: 1rem;
+        box-shadow: 0 8px 24px rgba(0, 45, 98, 0.22);
+        border-left: 6px solid var(--csjmu-gold);
+    }}
+    .csjmu-hero h1 {{
+        margin: 0 0 0.35rem 0;
+        font-size: 1.65rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+    }}
+    .csjmu-hero p {{
+        margin: 0;
+        opacity: 0.95;
+        font-size: 0.98rem;
+        line-height: 1.45;
+    }}
+    .csjmu-card {{
+        background-color: var(--secondary-background-color);
+        border-left: 5px solid var(--primary-color);
+        color: var(--text-color);
+        padding: 14px 16px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        margin-bottom: 12px;
+        font-size: 0.95rem;
+    }}
+    .csjmu-card.justify {{
         text-align: justify;
         text-justify: inter-word;
-    }
+    }}
+    [data-testid="stChatMessage"] {{
+        border-radius: 10px;
+    }}
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
 
-# Sidebar
 with st.sidebar:
-    st.title("About Bot")
-    
-    # About Section
-    st.markdown("## Description")
-    st.markdown("""
-        <div class="css-textbarboxtype">
-            An AI-powered chatbot designed to provide answers related to College Name.
+    st.markdown(f"### {COLLEGE_SHORT} Assistant")
+    st.caption(COLLEGE_NAME)
+
+    st.markdown("#### Appearance")
+    st.caption(
+        "Click the **⋮** icon (top-right) → **Settings** → **Theme**, "
+        "then choose **Light**, **Dark**, or **System**."
+    )
+
+    st.markdown("#### About")
+    st.markdown(
+        f"""
+        <div class="csjmu-card">
+            Answers questions about {COLLEGE_NAME} using your uploaded PDF knowledge base
+            and retrieval-augmented generation (RAG).
         </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("## Goals")
-    st.markdown("""
-        <div class="css-textbarboxtype">
-            - Student Support<br>
-            - Admissions Guidance<br>
-            - Academic Information<br>
-            - Campus Services<br>
-            - Program Details<br>
-            - Accessibility<br>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Focus areas")
+    st.markdown(
+        """
+        <div class="csjmu-card">
+            Admissions · Academics · Calendars · Programs · Campus services
         </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("## Purpose")
-    st.markdown("""
-        <div class="css-textbarboxtype">
-            Designed as a seamless, user-friendly entry point to College Name's support system, this chatbot helps students and prospective students easily access accurate information without confusion or hesitation. Whether users have questions about admissions, academic programs, campus facilities, student services, or general assistance, the chatbot provides clear explanations, reliable guidance, and context-aware responses powered by College Name's verified knowledge base. By simplifying interactions and delivering timely, trustworthy answers, it enhances user experience and smoothly connects them to human advisors whenever needed.
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("#### Purpose")
+    st.markdown(
+        f"""
+        <div class="csjmu-card justify">
+            This assistant helps students and visitors find consistent, document-grounded
+            information about {COLLEGE_NAME}, reducing repetitive queries and pointing users
+            to the right offices when something is not in the knowledge base.
         </div>
-    """, unsafe_allow_html=True)
-    
-    # Values
-    st.markdown("## Our Values")
-    st.markdown("""
-        <div class="css-textbarboxtype">
-            - Student-Centered<br>
-            - Accessibility<br>
-            - Accuracy<br>
-            - Transparency<br>
-            - Professionalism<br>
-            - Inclusivity<br>
-            - Excellence<br>
-            - Support<br>
-            - Integrity<br>
-            - Continuous Improvement<br>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    # Chat History Section
+        """,
+        unsafe_allow_html=True,
+    )
+
     st.markdown("---")
-    st.markdown("## Chat History")
-    
+    st.markdown("#### Session")
+
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
-    
-    # Display chat history previews
-    for idx, message in enumerate(st.session_state.chat_history):
-        if message["role"] == "user":
-            if st.button(f"Chat {idx//2 + 1}: {message['content'][:30]}...", key=f"history_{idx}"):
-                # Load this conversation
-                st.session_state.selected_chat = idx//2
-    
-    # PDF Export Button
+
+    st.caption(f"Messages in this session: {len(st.session_state.chat_history)}")
+
+    if st.button("Clear conversation", use_container_width=True):
+        st.session_state.chat_history = []
+        if "conversational_chain" in st.session_state:
+            del st.session_state.conversational_chain
+        st.rerun()
+
     st.markdown("---")
-    if st.button("Export Chat to PDF"):
+    st.markdown("#### Export")
+
+    if st.button("Export chat to PDF", use_container_width=True):
         if len(st.session_state.chat_history) > 0:
             try:
-                # Create PDF
                 pdf = FPDF()
                 pdf.add_page()
-                
-                # Use Arial Unicode MS font
-                pdf.set_font('Arial', '', 10)
-                
-                # PDF Header
-                pdf.set_font('Arial', 'B', 16)
-                pdf.cell(0, 10, "College Name Chatbot - Conversation History", ln=True, align='C')
-                pdf.set_font('Arial', '', 12)
-                pdf.cell(0, 10, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align='C')
-                pdf.ln(10)
-                
-                # Add conversation
-                pdf.set_font('Arial', '', 10)
+                pdf.set_font("Helvetica", "B", 16)
+                pdf.cell(
+                    0,
+                    10,
+                    text_for_pdf(f"{COLLEGE_SHORT} - Conversation export"),
+                    ln=True,
+                    align="C",
+                )
+                pdf.set_font("Helvetica", "", 11)
+                pdf.cell(
+                    0,
+                    8,
+                    text_for_pdf(
+                        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    ),
+                    ln=True,
+                    align="C",
+                )
+                pdf.ln(6)
+
                 for message in st.session_state.chat_history:
-                    # Role header
-                    pdf.set_font('Arial', 'B', 10)
-                    pdf.cell(0, 10, message["role"].capitalize(), ln=True)
-                    # Message content
-                    pdf.set_font('Arial', '', 10)
-                    pdf.multi_cell(0, 10, remove_emojis(message["content"]))
-                    pdf.ln(5)
-                
-                # Save PDF
-                filename = f"mental_health_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                pdf.output(filename)
-                
-                # Create download button
-                with open(filename, "rb") as f:
-                    st.download_button(
-                        label="Download PDF",
-                        data=f,
-                        file_name=filename,
-                        mime="application/pdf"
+                    pdf.set_font("Helvetica", "B", 10)
+                    pdf.cell(
+                        0,
+                        8,
+                        text_for_pdf(message["role"].capitalize()),
+                        ln=True,
                     )
-                
-                # Clean up the file
+                    pdf.set_font("Helvetica", "", 10)
+                    pdf.multi_cell(0, 6, text_for_pdf(message["content"]))
+                    pdf.ln(4)
+
+                filename = f"csjmu_chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                pdf.output(filename)
+
+                with open(filename, "rb") as f:
+                    pdf_bytes = f.read()
+                st.download_button(
+                    label="Download PDF",
+                    data=pdf_bytes,
+                    file_name=filename,
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
                 os.remove(filename)
-                
             except Exception as e:
-                st.error(f"Error generating PDF: {str(e)}")
+                st.error(f"Could not generate PDF: {e}")
         else:
-            st.warning("No chat history to export!")
+            st.warning("No messages to export yet.")
 
-# Main chat interface
-# Add header image
+# Main area
+st.markdown(
+    f"""
+    <div class="csjmu-hero">
+        <h1>{COLLEGE_SHORT} · University Assistant</h1>
+        <p>{COLLEGE_NAME} — ask about admissions, academics, holidays, syllabus, and more.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-st.title("🎓 College Name Chatbot")
-
-#st.image("https://img.freepik.com/premium-vector/mental-health-awareness-month-take-care-your-body-take-care-your-health-increase-awareness_758894-821.jpg?w=1380", use_column_width=True)
-
-#st.image("D:\Final Project\PythonDemoProject3\images\may-is-mental-health-awareness-month-diversity-silhouettes-of-adults-and-children-of-different-nationalities-and-appearances-colorful-people-contour-in-flat-style-vector.jpg")
-
-st.image("https://static.vecteezy.com/system/resources/previews/001/912/491/large_2x/set-of-scenes-business-people-meeting-with-infographics-presentation-free-vector.jpg", use_column_width=True)
-
-#st.image("D:\Final Project\PythonDemoProject3\images\may-is-mental-health-awareness-month-diversity-silhouettes-of-adults-and-children-of-different-nationalities-and-appearances-colorful-people-contour-in-flat-style-vector-2.jpg")
-
-#st.image("https://static.vecteezy.com/system/resources/previews/039/630/872/large_2x/may-is-mental-health-awareness-month-diversity-silhouettes-of-adults-and-children-of-different-nationalities-and-appearances-colorful-people-contour-in-flat-style-vector.jpg", use_column_width=True)
-#st.image("https://static.vecteezy.com/system/resources/previews/040/941/494/non_2x/may-is-mental-health-awareness-month-banner-with-silhouettes-of-diverse-people-and-green-ribbon-women-and-men-of-different-ages-religions-and-races-design-for-info-importance-psychological-state-vector.jpg", use_column_width=True)
-#st.image("https://static.vecteezy.com/system/resources/previews/038/147/547/non_2x/may-is-mental-health-awareness-month-banner-horizontal-design-with-man-women-children-old-people-silhouette-in-flat-style-informing-about-importance-of-good-state-of-mind-well-being-presentation-vector.jpg", use_column_width=True)
-
+st.image(
+    "https://csjmurec.samarth.edu.in/logo.png",
+    use_container_width=True,
+)
 
 if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = setup_vectorstore()
@@ -381,22 +399,63 @@ if "vectorstore" not in st.session_state:
 if "conversational_chain" not in st.session_state:
     st.session_state.conversational_chain = chat_chain(st.session_state.vectorstore)
 
-# Display chat messages
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input
-user_input = st.chat_input("Ask a question about College Name")
+st.markdown("### Quick Help")
 
+# ---- INPUT HANDLING ----
+user_input = st.chat_input(
+    f"Ask about {COLLEGE_SHORT}…",
+    key="main_chat_input"
+)
+
+# Buttons override input
+col1, col2, col3 = st.columns(3)
+
+if col1.button("Admission Process", key="btn_admission"):
+    user_input = "Tell me the admission process"
+
+if col2.button("Courses Offered", key="btn_courses"):
+    user_input = "What courses are available?"
+
+if col3.button("Fee Structure", key="btn_fees"):
+    user_input = "Explain fee structure"
 if user_input:
+    # user message show
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    # assistant response
+    with st.chat_message("assistant"):
+        if contains_sensitive_topics(user_input):
+            assistant_response = "Restricted content"
+if user_input:
+    # show user message
     st.session_state.chat_history.append({"role": "user", "content": user_input})
 
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    # assistant response (ONLY ONCE)
     with st.chat_message("assistant"):
-        response = st.session_state.conversational_chain({"question": user_input})
-        assistant_response = response["answer"]
-        st.markdown(assistant_response)
-        st.session_state.chat_history.append({"role": "assistant", "content": assistant_response})
+        if contains_sensitive_topics(user_input):
+            assistant_response = "Restricted content"
+
+            st.markdown(assistant_response)
+
+        else:
+            response = st.session_state.conversational_chain({"question": user_input})
+            assistant_response = response["answer"]
+
+            st.markdown(assistant_response)
+
+            # show sources
+            if response.get("source_documents"):
+                with st.expander("Sources"):
+                    for doc in response["source_documents"]:
+                        st.write(doc.metadata.get("source", "Unknown"))
+
+    # save chat
+    st.session_state.chat_history.append(
+        {"role": "assistant", "content": assistant_response}
+    )
